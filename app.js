@@ -638,6 +638,19 @@ function defaultSetCount(exercise) {
   return 1;
 }
 
+function defaultTargetValue(exercise) {
+  if (exercise.target.mode === "reps") return String(exercise.target.minReps);
+  if (exercise.target.mode === "duration") return String(exercise.target.minMinutes);
+  if (exercise.target.mode === "rounds") return String(exercise.target.minRounds);
+  return "";
+}
+
+function targetInputLabel(exercise) {
+  if (exercise.target.mode === "duration") return "Minutes";
+  if (exercise.target.mode === "rounds") return "Rounds";
+  return "Reps";
+}
+
 function createSet(load = "", reps = "", effort = "right", options = {}) {
   const set = {
     load: String(load || ""),
@@ -1086,10 +1099,14 @@ function renderMovement() {
   const entry = active.entries[movementIndex] || {};
   const suggestedNumericLoad = parseLoad(suggestion.load);
   const defaultWeight = entry.weight || (suggestedNumericLoad !== null ? String(suggestedNumericLoad) : "");
+  const defaultTarget = defaultTargetValue(movement);
   let displaySets = normalizeEntrySets(entry, movement);
   const setsAreBlank = displaySets.every((set) => !set.load && !set.reps);
   if (setsAreBlank && defaultWeight) {
     displaySets = displaySets.map((set) => ({ ...set, load: defaultWeight }));
+  }
+  if (defaultTarget) {
+    displaySets = displaySets.map((set) => ({ ...set, reps: set.reps || defaultTarget }));
   }
   movementMount.innerHTML = `
     <article class="movement-card">
@@ -1162,7 +1179,8 @@ function renderMovement() {
 
 function renderSetRow(set, index, exercise) {
   const loadLabel = exercise.load === "bodyweight" ? "Load / note" : "Load";
-  const repsLabel = exercise.target.mode === "duration" ? "Minutes" : "Reps";
+  const repsLabel = targetInputLabel(exercise);
+  const repsPlaceholder = defaultTargetValue(exercise);
   return `
     <div class="set-row" data-set-index="${index}">
       <strong>Set ${index + 1}</strong>
@@ -1172,7 +1190,7 @@ function renderSetRow(set, index, exercise) {
       </label>
       <label>
         <span>${repsLabel}</span>
-        <input class="set-reps" inputmode="decimal" autocomplete="off" value="${escapeAttr(set.reps)}" placeholder="${exercise.target.mode === "duration" ? "25" : "8"}" />
+        <input class="set-reps" inputmode="decimal" autocomplete="off" value="${escapeAttr(set.reps)}" placeholder="${escapeAttr(repsPlaceholder)}" />
       </label>
       <label>
         <span>Effort</span>
