@@ -353,6 +353,7 @@ const rules = {
 };
 
 const storageKey = "do-now-workout-tracker-v2";
+const schemaVersion = 3;
 const state = loadState();
 
 let person = state.person || "me";
@@ -381,17 +382,209 @@ function ex(name, prescription, mediaKey, overrides = {}) {
   };
 }
 
-function loadState() {
-  const fresh = { person: "me", active: {}, logs: { me: [], wife: [] } };
+function createId(prefix = "id") {
+  let value = "";
   try {
-    return { ...fresh, ...JSON.parse(localStorage.getItem(storageKey) || "{}") };
+    value = globalThis.crypto?.randomUUID?.() || "";
   } catch {
+    value = "";
+  }
+  if (!value) {
+    value = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+  return `${prefix}_${value}`;
+}
+
+function createFreshState() {
+  return {
+    schemaVersion,
+    clientId: createId("client"),
+    person: "me",
+    active: {},
+    logs: { me: [], wife: [] },
+  };
+}
+
+function timestamp(value, fallback = Date.now()) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function loadState() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(storageKey) || "{}");
+    const migrated = migrateState(raw);
+    localStorage.setItem(storageKey, JSON.stringify(migrated));
+    return migrated;
+  } catch {
+    const fresh = createFreshState();
+    localStorage.setItem(storageKey, JSON.stringify(fresh));
     return fresh;
   }
 }
 
 function saveState() {
+  state.schemaVersion = schemaVersion;
+  state.clientId ||= createId("client");
+  state.person = person || state.person || "me";
+  state.logs ||= { me: [], wife: [] };
+  state.logs.me ||= [];
+  state.logs.wife ||= [];
+  state.active ||= {};
   localStorage.setItem(storageKey, JSON.stringify(state));
+}
+
+function replaceState(nextState) {
+  const migrated = migrateState(nextState);
+  Object.keys(state).forEach((key) => delete state[key]);
+  Object.assign(state, migrated);
+  person = state.person || "me";
+  saveState();
+}
+
+function migrateState(raw = {}) {
+  const fresh = createFreshState();
+  const source = raw && typeof raw === "object" ? raw : {};
+  const migrated = {
+    ...fresh,
+    schemaVersion,
+    clientId: source.clientId || fresh.clientId,
+    person: source.person === "wife" ? "wife" : "me",
+    active: {},
+    logs: {
+      me: migrateLogs(source.logs?.me, "me"),
+      wife: migrateLogs(source.logs?.wife, "wife"),
+    },
+  };
+
+  const rawActive = source.active && typeof source.active === "object" ? source.active : {};
+  ["me", "wife"].forEach((personId) => {
+    const active = rawActive[personId]
+      || (personId === migrated.person && Number.isFinite(Number(rawActive.sessionIndex)) ? rawActive : null);
+    const migratedActive = active ? migrateActive(active, personId) : null;
+    if (migratedActive) migrated.active[personId] = migratedActive;
+  });
+
+  return migrated;
+}
+
+function migrateLogs(logs, personId) {
+  return Array.isArray(logs)
+    ? logs.map((log) => migrateLog(log, personId)).filter(Boolean)
+    : [];
+}
+
+function migrateLog(log, personId) {
+  if (!log || typeof log !== "object") return null;
+
+  const completedAt = timestamp(log.completedAt || log.createdAt);
+  const base = {
+    ...log,
+    id: log.id || createId(log.type === "rest" ? "rest" : "workout"),
+    schemaVersion,
+    personId,
+    createdAt: timestamp(log.createdAt, completedAt),
+    completedAt,
+  };
+
+  if (log.type === "rest") {
+    return {
+      ...base,
+      type: "rest",
+      sessionId: "rest",
+      sessionTitle: log.sessionTitle || "Rest / walk",
+      completed: [],
+      total: 0,
+      entries: [],
+      exerciseLogs: [],
+    };
+  }
+
+  const routine = getRoutineByPerson(personId);
+  const session = findSessionForRecord(routine, log) || routine.sessions[0];
+  const completed = normalizeCompletedIndexes(log.completed, session.exercises.length);
+  const entries = session.exercises.map((exercise, index) => normalizeEntryForStorage(
+    findEntryForExercise(log, exercise, index),
+    exercise,
+    completed.includes(index),
+  ));
+
+  return {
+    ...base,
+    type: "workout",
+    sessionId: session.id,
+    sessionTitle: log.sessionTitle || session.title,
+    startedAt: timestamp(log.startedAt, completedAt),
+    completed,
+    total: session.exercises.length,
+    exerciseIds: session.exercises.map((exercise) => exercise.id),
+    entries,
+    exerciseLogs: entries.map(cloneEntry),
+  };
+}
+
+function migrateActive(active, personId) {
+  if (!active || typeof active !== "object") return null;
+
+  const routine = getRoutineByPerson(personId);
+  const session = findSessionForRecord(routine, active) || routine.sessions[0];
+  const sessionIndex = Math.max(0, routine.sessions.findIndex((item) => item.id === session.id));
+  const done = session.exercises.map((_, index) => Boolean(active.done?.[index]));
+  const entries = session.exercises.map((exercise, index) => normalizeEntryForStorage(
+    findEntryForExercise(active, exercise, index),
+    exercise,
+    done[index],
+  ));
+
+  return {
+    id: active.id || createId("active"),
+    schemaVersion,
+    personId,
+    sessionId: session.id,
+    sessionIndex,
+    startedAt: timestamp(active.startedAt),
+    returningFromGap: Boolean(active.returningFromGap),
+    done,
+    entries,
+    cursor: Number.isFinite(Number(active.cursor)) ? Number(active.cursor) : 0,
+  };
+}
+
+function getRoutineByPerson(personId) {
+  return routines[personId] || routines.me;
+}
+
+function findSessionForRecord(routine, record = {}) {
+  if (record.sessionId) {
+    const byId = routine.sessions.find((session) => session.id === record.sessionId);
+    if (byId) return byId;
+  }
+
+  const sessionIndex = Number(record.sessionIndex);
+  if (Number.isInteger(sessionIndex) && routine.sessions[sessionIndex]) {
+    return routine.sessions[sessionIndex];
+  }
+
+  if (record.sessionTitle) {
+    const byTitle = routine.sessions.find((session) => session.title === record.sessionTitle);
+    if (byTitle) return byTitle;
+  }
+
+  return null;
+}
+
+function findEntryForExercise(record = {}, exercise, index) {
+  const entries = Array.isArray(record.entries) ? record.entries : [];
+  const exerciseLogs = Array.isArray(record.exerciseLogs) ? record.exerciseLogs : [];
+  const byId = [...exerciseLogs, ...entries].find((entry) => entry?.exerciseId === exercise.id);
+  return entries[index] || byId || {};
+}
+
+function normalizeCompletedIndexes(value, count) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item, index) => item === true ? index : Number(item))
+    .filter((item) => Number.isInteger(item) && item >= 0 && item < count);
 }
 
 function slug(value) {
@@ -445,13 +638,25 @@ function defaultSetCount(exercise) {
   return 1;
 }
 
-function createSet(load = "", reps = "", effort = "right") {
-  return { load: String(load || ""), reps: String(reps || ""), effort: effort || "right" };
+function createSet(load = "", reps = "", effort = "right", options = {}) {
+  const set = {
+    load: String(load || ""),
+    reps: String(reps || ""),
+    effort: effort || "right",
+  };
+  if (options.id) set.id = options.id;
+  if (options.setIndex) set.setIndex = options.setIndex;
+  return set;
 }
 
 function normalizeEntrySets(entry = {}, exercise, fallbackLoad = "") {
   if (Array.isArray(entry.sets) && entry.sets.length) {
-    return entry.sets.map((set) => createSet(set.load, set.reps, set.effort || entry.effort || "right"));
+    return entry.sets.map((set, index) => createSet(
+      set.load,
+      set.reps,
+      set.effort || entry.effort || "right",
+      { id: set.id, setIndex: set.setIndex || index + 1 },
+    ));
   }
 
   const reps = parseReps(entry.reps);
@@ -461,6 +666,41 @@ function normalizeEntrySets(entry = {}, exercise, fallbackLoad = "") {
     reps[index] ?? "",
     entry.effort || "right",
   ));
+}
+
+function withSetIds(sets = []) {
+  return sets.map((set, index) => createSet(
+    set.load,
+    set.reps,
+    set.effort,
+    { id: set.id || createId("set"), setIndex: index + 1 },
+  ));
+}
+
+function normalizeEntryForStorage(entry = {}, exercise, completed = false) {
+  const source = entry && typeof entry === "object" ? entry : {};
+  return {
+    id: source.id || createId("entry"),
+    exerciseId: source.exerciseId || exercise.id,
+    exerciseName: source.exerciseName || exercise.name,
+    prescription: source.prescription || exercise.prescription,
+    mediaKey: source.mediaKey || exercise.mediaKey,
+    completed: Boolean(completed || source.completed),
+    sets: withSetIds(normalizeEntrySets(source, exercise)),
+    notes: String(source.notes || ""),
+  };
+}
+
+function cloneEntry(entry) {
+  return {
+    ...entry,
+    sets: Array.isArray(entry.sets) ? entry.sets.map((set) => ({ ...set })) : [],
+  };
+}
+
+function hasLoggedSetData(entry = {}) {
+  if (entry.weight || entry.reps || entry.notes) return true;
+  return Array.isArray(entry.sets) && entry.sets.some((set) => set.load || set.reps);
 }
 
 function completedSetStats(entry = {}, exercise) {
@@ -515,7 +755,7 @@ function render() {
 }
 
 function getRoutine() {
-  return routines[person];
+  return getRoutineByPerson(person);
 }
 
 function getLogs() {
@@ -533,8 +773,7 @@ function getActive() {
   active.cursor ||= 0;
   session.exercises.forEach((exercise, index) => {
     active.done[index] = Boolean(active.done[index]);
-    active.entries[index] ||= { sets: Array.from({ length: defaultSetCount(exercise) }, () => createSet()), notes: "" };
-    active.entries[index].sets = normalizeEntrySets(active.entries[index], exercise);
+    active.entries[index] = normalizeEntryForStorage(active.entries[index], exercise, active.done[index]);
   });
   return active;
 }
@@ -576,8 +815,9 @@ function findLastMovementLog(exercise) {
     if (exerciseIndex === -1) {
       exerciseIndex = session.exercises.findIndex((candidate) => candidate.id === exercise.id);
     }
-    const entry = log.entries?.[exerciseIndex];
-    if (exerciseIndex !== -1 && entry && (entry.weight || entry.reps || entry.effort || entry.sets?.length)) {
+    const entries = Array.isArray(log.entries) ? log.entries : log.exerciseLogs || [];
+    const entry = entries?.[exerciseIndex] || log.exerciseLogs?.find((item) => item.exerciseId === exercise.id);
+    if (exerciseIndex !== -1 && entry && hasLoggedSetData(entry)) {
       return { log, session, exercise: session.exercises[exerciseIndex], entry, exerciseIndex };
     }
   }
@@ -1065,6 +1305,15 @@ function openSettingsSheet() {
         <li><strong>Regress:</strong> multiple missed floors or too-hard sets.</li>
       </ul>
     </div>
+    <div class="settings-block">
+      <p class="eyebrow">Data</p>
+      <p class="storage-meta">Local device · schema v${schemaVersion} · JSON backup</p>
+      <div class="data-actions">
+        <button class="ghost-button" type="button" id="exportData">Export progress</button>
+        <button class="ghost-button" type="button" id="importData">Import progress</button>
+      </div>
+      <input class="file-input" id="importDataFile" type="file" accept="application/json" />
+    </div>
   `, { eyebrow: "Profile" });
 
   sheetMount.querySelectorAll("[data-person]").forEach((button) => {
@@ -1077,6 +1326,46 @@ function openSettingsSheet() {
       render();
     });
   });
+
+  document.getElementById("exportData").addEventListener("click", exportProgressData);
+  document.getElementById("importData").addEventListener("click", () => {
+    document.getElementById("importDataFile").click();
+  });
+  document.getElementById("importDataFile").addEventListener("change", (event) => {
+    importProgressData(event.target.files?.[0]);
+  });
+}
+
+function exportProgressData() {
+  saveState();
+  const payload = JSON.stringify(state, null, 2);
+  const blob = new Blob([payload], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `do-now-workout-tracker-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+  showToast("Export downloaded");
+}
+
+function importProgressData(file) {
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.addEventListener("load", () => {
+    try {
+      replaceState(JSON.parse(String(reader.result || "{}")));
+      closeSheet();
+      render();
+      showToast("Progress imported");
+    } catch {
+      showToast("Import failed");
+    }
+  });
+  reader.readAsText(file);
 }
 
 function openFormSheet(exercise, ref) {
@@ -1117,14 +1406,15 @@ function startOrResume() {
       ? (Date.now() - lastWorkout.completedAt) / 36e5 >= getRoutine().staleHours
       : false;
     setActive({
+      id: createId("active"),
+      schemaVersion,
+      personId: person,
+      sessionId: session.id,
       sessionIndex,
       startedAt: Date.now(),
       returningFromGap,
       done: session.exercises.map(() => false),
-      entries: session.exercises.map((exercise) => ({
-        sets: Array.from({ length: defaultSetCount(exercise) }, () => createSet()),
-        notes: "",
-      })),
+      entries: session.exercises.map((exercise) => normalizeEntryForStorage({}, exercise, false)),
       cursor: 0,
     });
   }
@@ -1134,16 +1424,22 @@ function startOrResume() {
 
 function saveMovementEntry() {
   const active = getActive();
+  if (!active) return;
   const session = getRoutine().sessions[active.sessionIndex];
   const index = getCurrentMovementIndex(active, session);
-  active.entries[index] = {
+  const exercise = session.exercises[index];
+  const existingSets = active.entries[index]?.sets || [];
+  active.entries[index] = normalizeEntryForStorage({
+    ...active.entries[index],
     sets: Array.from(document.querySelectorAll(".set-row")).map((row) => ({
+      id: existingSets[Number(row.dataset.setIndex)]?.id,
+      setIndex: Number(row.dataset.setIndex) + 1,
       load: row.querySelector(".set-load").value,
       reps: row.querySelector(".set-reps").value,
       effort: row.querySelector(".set-effort").value || "right",
     })),
     notes: document.getElementById("notesInput").value,
-  };
+  }, exercise, active.done[index]);
   setActive(active);
 }
 
@@ -1152,13 +1448,17 @@ function copySetOneLoad() {
   const active = getActive();
   const session = getRoutine().sessions[active.sessionIndex];
   const index = getCurrentMovementIndex(active, session);
+  const exercise = session.exercises[index];
   const sets = active.entries[index].sets;
   const firstLoad = sets[0]?.load || "";
   if (!firstLoad) {
     showToast("Set 1 has no load");
     return;
   }
-  active.entries[index].sets = sets.map((set) => ({ ...set, load: firstLoad }));
+  active.entries[index] = normalizeEntryForStorage({
+    ...active.entries[index],
+    sets: sets.map((set) => ({ ...set, load: firstLoad })),
+  }, exercise, active.done[index]);
   setActive(active);
   renderMovement();
 }
@@ -1178,7 +1478,7 @@ function dropFinalSetLoad() {
   }
   const nextLoad = roundToIncrement(currentLoad - (exercise.increment || 5), exercise.increment || 5);
   sets[finalIndex].load = String(nextLoad);
-  active.entries[index].sets = sets;
+  active.entries[index] = normalizeEntryForStorage({ ...active.entries[index], sets }, exercise, active.done[index]);
   setActive(active);
   renderMovement();
 }
@@ -1188,10 +1488,11 @@ function addWorkSet() {
   const active = getActive();
   const session = getRoutine().sessions[active.sessionIndex];
   const index = getCurrentMovementIndex(active, session);
+  const exercise = session.exercises[index];
   const sets = active.entries[index].sets;
   const last = sets.at(-1) || createSet();
-  sets.push(createSet(last.load, "", "right"));
-  active.entries[index].sets = sets;
+  sets.push(createSet(last.load, "", "right", { id: createId("set"), setIndex: sets.length + 1 }));
+  active.entries[index] = normalizeEntryForStorage({ ...active.entries[index], sets }, exercise, active.done[index]);
   setActive(active);
   renderMovement();
 }
@@ -1201,7 +1502,7 @@ function completeExercise() {
   const active = getActive();
   const session = getRoutine().sessions[active.sessionIndex];
   const index = getCurrentMovementIndex(active, session);
-  active.entries[index].sets = normalizeEntrySets(active.entries[index], session.exercises[index]);
+  active.entries[index] = normalizeEntryForStorage(active.entries[index], session.exercises[index], true);
   active.done[index] = true;
   active.cursor = getCurrentMovementIndex(active, session);
   setActive(active);
@@ -1223,17 +1524,7 @@ function finishSession() {
   if (!active) return;
   const routine = getRoutine();
   const session = routine.sessions[active.sessionIndex];
-  getLogs().push({
-    type: "workout",
-    sessionId: session.id,
-    sessionTitle: session.title,
-    completedAt: Date.now(),
-    startedAt: active.startedAt,
-    completed: active.done.map((done, index) => done ? index : null).filter((index) => index !== null),
-    total: session.exercises.length,
-    exerciseIds: session.exercises.map((exercise) => exercise.id),
-    entries: active.entries,
-  });
+  getLogs().push(buildWorkoutLog(active, session));
   setActive(null);
   saveState();
   showToast("Session logged");
@@ -1242,18 +1533,55 @@ function finishSession() {
 }
 
 function logRest() {
-  getLogs().push({
-    type: "rest",
-    sessionId: "rest",
-    sessionTitle: "Rest / walk",
-    completedAt: Date.now(),
-    completed: [],
-    total: 0,
-    entries: [],
-  });
+  getLogs().push(buildRestLog());
   saveState();
   showToast("Rest logged");
   render();
+}
+
+function buildWorkoutLog(active, session) {
+  const completedAt = Date.now();
+  const completed = active.done.map((done, index) => done ? index : null).filter((index) => index !== null);
+  const entries = session.exercises.map((exercise, index) => normalizeEntryForStorage(
+    active.entries[index],
+    exercise,
+    active.done[index],
+  ));
+
+  return {
+    id: createId("workout"),
+    schemaVersion,
+    personId: person,
+    type: "workout",
+    sessionId: session.id,
+    sessionTitle: session.title,
+    completedAt,
+    createdAt: completedAt,
+    startedAt: active.startedAt,
+    completed,
+    total: session.exercises.length,
+    exerciseIds: session.exercises.map((exercise) => exercise.id),
+    entries: entries.map(cloneEntry),
+    exerciseLogs: entries.map(cloneEntry),
+  };
+}
+
+function buildRestLog() {
+  const completedAt = Date.now();
+  return {
+    id: createId("rest"),
+    schemaVersion,
+    personId: person,
+    type: "rest",
+    sessionId: "rest",
+    sessionTitle: "Rest / walk",
+    completedAt,
+    createdAt: completedAt,
+    completed: [],
+    total: 0,
+    entries: [],
+    exerciseLogs: [],
+  };
 }
 
 function getCurrentMovementIndex(active, session) {

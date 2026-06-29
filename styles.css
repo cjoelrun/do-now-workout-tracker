@@ -639,6 +639,23 @@ h4 {
   gap: 12px;
 }
 
+.storage-meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 800;
+}
+
+.data-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.file-input {
+  display: none;
+}
+
 .menu-list button {
   display: grid;
   gap: 4px;
@@ -716,6 +733,10 @@ h4 {
 
   .set-tools {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .data-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .set-row {
