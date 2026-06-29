@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Do Now Workout Tracker</title>
+    <meta
+      name="description"
+      content="Mobile-first workout tracker that resumes from the latest log instead of a fixed weekly schedule."
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="app-shell compact-shell">
+      <section class="app-topbar" aria-label="Current app screen">
+        <div>
+          <p class="eyebrow">Anytime Fitness</p>
+          <h1>Now</h1>
+        </div>
+        <button class="icon-button" type="button" id="menuButton" aria-haspopup="dialog">
+          Menu
+        </button>
+      </section>
+    </header>
+
+    <main class="content">
+      <section id="nowMount" class="now-grid" aria-live="polite"></section>
+      <section id="movementMount" aria-live="polite"></section>
+    </main>
+
+    <section id="sheetMount" aria-live="polite"></section>
+
+    <script src="app.js"></script>
+  </body>
+</html>
