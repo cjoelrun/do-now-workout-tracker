@@ -286,7 +286,7 @@ const routines = {
           ex("Machine chest press or push-ups", "2 x 8-12", "machineChestPress"),
           ex("Seated cable row", "2-3 x 10-12", "cableRow"),
           ex("Glute bridge or hip thrust machine", "2 x 10-15", "rdl"),
-          ex("Plank", "2-3 rounds", "plank"),
+          ex("Plank", "2-3 x 30-45 sec", "plank"),
         ],
       },
       {
@@ -299,7 +299,7 @@ const routines = {
           ex("Incline walk, bike, or elliptical", "25-35 min", "cardio"),
           ex("Dead bug", "3 x 8-12 each side", "deadBug"),
           ex("Pallof press", "3 x 10-12 each side", "pallof"),
-          ex("Side plank", "2 rounds each side", "sidePlank"),
+          ex("Side plank", "2 x 20-30 sec each side", "sidePlank"),
           ex("Stretch or mobility", "5-10 min optional", "core"),
         ],
       },
@@ -592,7 +592,20 @@ function slug(value) {
 }
 
 function parsePrescription(prescription) {
-  const setsMatch = String(prescription).match(/(\d+)(?:-(\d+))?\s*x\s*(\d+)(?:-(\d+))?/i);
+  const text = String(prescription);
+  const timedSetsMatch = text.match(/(\d+)(?:-(\d+))?\s*x\s*(\d+)(?:-(\d+))?\s*(sec|secs|second|seconds|min|mins|minute|minutes)\b/i);
+  if (timedSetsMatch) {
+    return {
+      mode: "timedSets",
+      minSets: Number(timedSetsMatch[1]),
+      maxSets: Number(timedSetsMatch[2] || timedSetsMatch[1]),
+      minDuration: Number(timedSetsMatch[3]),
+      maxDuration: Number(timedSetsMatch[4] || timedSetsMatch[3]),
+      unit: normalizeTimeUnit(timedSetsMatch[5]),
+    };
+  }
+
+  const setsMatch = text.match(/(\d+)(?:-(\d+))?\s*x\s*(\d+)(?:-(\d+))?/i);
   if (setsMatch) {
     return {
       mode: "reps",
@@ -603,16 +616,17 @@ function parsePrescription(prescription) {
     };
   }
 
-  const durationMatch = String(prescription).match(/(\d+)(?:-(\d+))?\s*min/i);
+  const durationMatch = text.match(/(\d+)(?:-(\d+))?\s*(sec|secs|second|seconds|min|mins|minute|minutes)\b/i);
   if (durationMatch) {
     return {
       mode: "duration",
-      minMinutes: Number(durationMatch[1]),
-      maxMinutes: Number(durationMatch[2] || durationMatch[1]),
+      minDuration: Number(durationMatch[1]),
+      maxDuration: Number(durationMatch[2] || durationMatch[1]),
+      unit: normalizeTimeUnit(durationMatch[3]),
     };
   }
 
-  const roundsMatch = String(prescription).match(/(\d+)(?:-(\d+))?\s*round/i);
+  const roundsMatch = text.match(/(\d+)(?:-(\d+))?\s*round/i);
   if (roundsMatch) {
     return {
       mode: "rounds",
@@ -622,6 +636,10 @@ function parsePrescription(prescription) {
   }
 
   return { mode: "open" };
+}
+
+function normalizeTimeUnit(value) {
+  return String(value).toLowerCase().startsWith("s") ? "sec" : "min";
 }
 
 function parseLoad(value) {
@@ -634,21 +652,59 @@ function parseReps(value) {
 }
 
 function defaultSetCount(exercise) {
-  if (exercise.target.mode === "reps") return exercise.target.minSets;
+  if (Number.isFinite(exercise.target.minSets)) return exercise.target.minSets;
   return 1;
 }
 
 function defaultTargetValue(exercise) {
   if (exercise.target.mode === "reps") return String(exercise.target.minReps);
-  if (exercise.target.mode === "duration") return String(exercise.target.minMinutes);
+  if (exercise.target.mode === "timedSets") return String(exercise.target.minDuration);
+  if (exercise.target.mode === "duration") return String(exercise.target.minDuration);
   if (exercise.target.mode === "rounds") return String(exercise.target.minRounds);
   return "";
 }
 
 function targetInputLabel(exercise) {
-  if (exercise.target.mode === "duration") return "Minutes";
+  if (exercise.target.mode === "timedSets" || exercise.target.mode === "duration") {
+    return exercise.target.unit === "sec" ? "Seconds" : "Minutes";
+  }
   if (exercise.target.mode === "rounds") return "Rounds";
+  if (exercise.target.mode === "open") return "Result";
   return "Reps";
+}
+
+function targetMinValue(exercise) {
+  if (exercise.target.mode === "reps") return exercise.target.minReps;
+  if (exercise.target.mode === "timedSets" || exercise.target.mode === "duration") return exercise.target.minDuration;
+  if (exercise.target.mode === "rounds") return exercise.target.minRounds;
+  return null;
+}
+
+function targetMaxValue(exercise) {
+  if (exercise.target.mode === "reps") return exercise.target.maxReps;
+  if (exercise.target.mode === "timedSets" || exercise.target.mode === "duration") return exercise.target.maxDuration;
+  if (exercise.target.mode === "rounds") return exercise.target.maxRounds;
+  return null;
+}
+
+function targetProgressIncrement(exercise) {
+  if (exercise.target.mode === "timedSets" && exercise.target.unit === "sec") return 5;
+  if (exercise.target.mode === "duration" && exercise.target.unit === "min") return 5;
+  return 1;
+}
+
+function formatTargetValue(exercise, value) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "";
+  const display = Number.isInteger(value) ? String(value) : value.toFixed(1);
+  if (exercise.target.mode === "timedSets" || exercise.target.mode === "duration") return `${display} ${exercise.target.unit}`;
+  if (exercise.target.mode === "rounds") return `${display} round${Number(value) === 1 ? "" : "s"}`;
+  if (exercise.target.mode === "reps") return `${display} rep${Number(value) === 1 ? "" : "s"}`;
+  return display;
+}
+
+function formatLoggedTargetValue(exercise, value) {
+  const parsed = parseLoad(value);
+  return parsed === null ? (value || "-") : formatTargetValue(exercise, parsed);
 }
 
 function createSet(load = "", reps = "", effort = "right", options = {}) {
@@ -664,12 +720,16 @@ function createSet(load = "", reps = "", effort = "right", options = {}) {
 
 function normalizeEntrySets(entry = {}, exercise, fallbackLoad = "") {
   if (Array.isArray(entry.sets) && entry.sets.length) {
-    return entry.sets.map((set, index) => createSet(
+    const normalized = entry.sets.map((set, index) => createSet(
       set.load,
       set.reps,
       set.effort || entry.effort || "right",
       { id: set.id, setIndex: set.setIndex || index + 1 },
     ));
+    while (normalized.length < defaultSetCount(exercise)) {
+      normalized.push(createSet("", "", entry.effort || "right", { setIndex: normalized.length + 1 }));
+    }
+    return normalized;
   }
 
   const reps = parseReps(entry.reps);
@@ -732,13 +792,19 @@ function primarySetLoad(sets) {
   return withLoad[0].load;
 }
 
+function primarySetTarget(sets) {
+  const withTarget = sets.filter((set) => set.reps !== null);
+  if (!withTarget.length) return null;
+  return withTarget[0].reps;
+}
+
 function formatSetSummary(entry = {}, exercise) {
   const sets = normalizeEntrySets(entry, exercise)
     .filter((set) => set.load || set.reps)
     .map((set, index) => {
       const load = set.load || "-";
-      const reps = set.reps || "-";
-      return `S${index + 1} ${load} x ${reps}${set.effort ? ` (${set.effort})` : ""}`;
+      const target = formatLoggedTargetValue(exercise, set.reps);
+      return `S${index + 1} ${load} x ${target}${set.effort ? ` (${set.effort})` : ""}`;
     });
   return sets.length ? sets.join("; ") : "-";
 }
@@ -838,21 +904,101 @@ function findLastMovementLog(exercise) {
   return null;
 }
 
+function getUnloadedSuggestion(exercise, previous) {
+  const minTarget = targetMinValue(exercise);
+  const maxTarget = targetMaxValue(exercise);
+  const defaultTarget = minTarget === null ? "No load" : formatTargetValue(exercise, minTarget);
+  const previousSets = previous ? completedSetStats(previous.entry, exercise) : [];
+  const hasLoggedTarget = previousSets.some((set) => set.reps !== null);
+
+  if (exercise.load === "cardio") {
+    return {
+      model: "Conditioning",
+      load: defaultTarget,
+      reps: exercise.prescription,
+      reason: "Stay in the target range and keep the pace easy enough to recover for lifting.",
+      previous,
+    };
+  }
+
+  if (!previous || !hasLoggedTarget || minTarget === null || maxTarget === null) {
+    return {
+      model: exercise.target.mode === "timedSets" ? "Timed hold" : "Technique",
+      load: defaultTarget,
+      reps: exercise.prescription,
+      reason: getUnloadedInitialReason(exercise),
+      previous,
+    };
+  }
+
+  const requiredSets = defaultSetCount(exercise);
+  if (previousSets.length < requiredSets) {
+    return {
+      model: "Repeat",
+      load: defaultTarget,
+      reps: exercise.prescription,
+      reason: `Last log only had ${previousSets.length} set${previousSets.length === 1 ? "" : "s"}. Repeat and log all work sets.`,
+      previous,
+    };
+  }
+
+  const judgedSets = previousSets.slice(0, requiredSets);
+  const previousSummary = formatSetSummary(previous.entry, exercise);
+  const hitTop = judgedSets.every((set) => set.reps !== null && set.reps >= maxTarget);
+  const missedFloorCount = judgedSets.filter((set) => set.reps === null || set.reps < minTarget).length;
+  const tooHardCount = judgedSets.filter((set) => set.effort === "too-hard").length;
+  const lastTarget = primarySetTarget(judgedSets) ?? minTarget;
+  const increment = targetProgressIncrement(exercise);
+
+  if (hitTop && tooHardCount === 0) {
+    return {
+      model: "Progress target",
+      load: formatTargetValue(exercise, lastTarget + increment),
+      reps: exercise.prescription,
+      reason: `Last time: ${previousSummary}. All required sets reached the top of the target range with clean effort.`,
+      previous,
+    };
+  }
+
+  if (missedFloorCount >= 2 || (missedFloorCount >= 1 && tooHardCount >= 1)) {
+    return {
+      model: "Regress target",
+      load: formatTargetValue(exercise, Math.max(minTarget, lastTarget - increment)),
+      reps: exercise.prescription,
+      reason: `Last time was below the floor or too hard. Hold the low end clean before adding more.`,
+      previous,
+    };
+  }
+
+  return {
+    model: "Repeat",
+    load: formatTargetValue(exercise, lastTarget),
+    reps: exercise.prescription,
+    reason: `Last time: ${previousSummary}. Add ${targetInputLabel(exercise).toLowerCase()} only when every set is clean.`,
+    previous,
+  };
+}
+
+function getUnloadedInitialReason(exercise) {
+  if (exercise.target.mode === "timedSets") {
+    return "Use the low end of the time range. Stop the set when brace or position breaks.";
+  }
+  if (exercise.target.mode === "duration") {
+    return "Use the low end of the time range and keep the effort controlled.";
+  }
+  if (exercise.target.mode === "rounds") {
+    return "Use the low end of the round target and keep every round clean.";
+  }
+  return "Use the low end of the target range and keep every rep clean.";
+}
+
 function getSuggestion(exercise, session, movementIndex) {
   const active = getActive();
   const previous = findLastMovementLog(exercise);
   const noLoad = exercise.load === "bodyweight" || exercise.load === "cardio" || exercise.increment === 0;
 
   if (noLoad) {
-    return {
-      model: exercise.load === "cardio" ? "Conditioning" : "Technique",
-      load: "No load",
-      reps: exercise.prescription,
-      reason: exercise.load === "cardio"
-        ? "Keep the pace easy enough to recover for lifting."
-        : "Use clean reps or holds before adding complexity.",
-      previous,
-    };
+    return getUnloadedSuggestion(exercise, previous);
   }
 
   const previousSets = previous ? completedSetStats(previous.entry, exercise) : [];
@@ -894,7 +1040,7 @@ function getSuggestion(exercise, session, movementIndex) {
       model: "Repeat",
       load: formatExerciseLoad(lastLoad, exercise),
       reps: exercise.prescription,
-      reason: "Last log did not include enough reps to judge progression. Repeat and log reps.",
+      reason: `Last log did not include enough ${targetInputLabel(exercise).toLowerCase()} to judge progression. Repeat and log every set.`,
       previous,
     };
   }
@@ -951,7 +1097,7 @@ function getSuggestion(exercise, session, movementIndex) {
       model: "Regress",
       load: formatExerciseLoad(load, exercise),
       reps: exercise.prescription,
-      reason: `Last time was too hard or below the floor. Trim load, get clean reps, then rebuild.`,
+      reason: `Last time was too hard or below the floor. Trim load, get clean ${targetInputLabel(exercise).toLowerCase()}, then rebuild.`,
       previous,
     };
   }
@@ -962,7 +1108,7 @@ function getSuggestion(exercise, session, movementIndex) {
     reps: exercise.prescription,
     reason: variedLoads
       ? `Last time: ${previousSummary}. Keep the top load and try to bring back-off sets up.`
-      : `Last time: ${previousSummary}. Add reps before adding load.`,
+      : `Last time: ${previousSummary}. Add ${targetInputLabel(exercise).toLowerCase()} before adding load.`,
     previous,
   };
 }
@@ -977,7 +1123,7 @@ function getRecommendation() {
       mode: "workout",
       label: "Resume workout",
       title: `${nextSession.title} is in progress`,
-      body: "Continue at the first unfinished exercise. Your weights and reps are already saved.",
+      body: "Continue at the first unfinished exercise. Your set targets are already saved.",
       session: nextSession,
     };
   }
@@ -1120,7 +1266,7 @@ function renderMovement() {
             <span>${doneCount}/${session.exercises.length} exercises done</span>
           </div>
         </div>
-        <section class="suggestion-panel" aria-label="Suggested load and reps">
+        <section class="suggestion-panel" aria-label="Suggested target">
           <div>
             <p class="eyebrow">${suggestion.model}</p>
             <strong>${suggestion.load}</strong>
@@ -1317,7 +1463,7 @@ function openSettingsSheet() {
     <div class="rules-grid">
       <ul>${rules[person].map((rule) => `<li>${rule}</li>`).join("")}</ul>
       <ul>
-        <li><strong>Initial:</strong> ramp to target reps with ${targetRir()}.</li>
+        <li><strong>Initial:</strong> ramp to the target with ${targetRir()}.</li>
         <li><strong>Progress:</strong> all required sets at top range and same load.</li>
         <li><strong>Repeat:</strong> top set is strong but back-off sets need work.</li>
         <li><strong>Regress:</strong> multiple missed floors or too-hard sets.</li>
